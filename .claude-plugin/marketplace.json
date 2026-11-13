@@ -1,0 +1,14 @@
+{
+  "name": "gemini-is-good-at-korean",
+  "owner": {
+    "name": "kbsooo",
+    "url": "https://github.com/kbsooo"
+  },
+  "plugins": [
+    {
+      "name": "gemini-ko",
+      "source": "./plugins/gemini-ko",
+      "description": "Claude 답변을 화면에 보여주기 직전에 Gemini로 자연스러운 한국어로 다듬어 표시합니다 (표시 전용)."
+    }
+  ]
+}

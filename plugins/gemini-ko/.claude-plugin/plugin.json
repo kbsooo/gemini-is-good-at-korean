@@ -1,0 +1,7 @@
+{
+  "name": "gemini-ko",
+  "version": "0.2.0",
+  "description": "Claude 답변을 화면 표시 직전에 Gemini로 자연스러운 한국어로 다시 써서 보여줍니다. Claude가 보는 대화 기록은 원문 그대로 유지됩니다.",
+  "author": { "name": "kbsoo" },
+  "license": "MIT"
+}
