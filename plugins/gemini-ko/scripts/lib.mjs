@@ -124,7 +124,12 @@ export function msUntilPacificMidnight(now = new Date()) {
 }
 
 // ---------- 코드/URL 보호 ----------
-// 코드 블록, 인라인 코드, URL은 토큰으로 바꿔서 Gemini가 건드리지 못하게 한다.
+// 코드 블록은 토큰으로 바꿔서 Gemini에게 아예 보여주지 않는다.
+// 인라인 코드와 URL은 그대로 보여준다. 가리면 Gemini가 받침을 몰라서 뒤에 붙는 조사를 틀리기 때문이다
+// (`notes.txt`을, `cat`를). 대신 돌아온 글에 원래 모습 그대로 남아 있는지 검사한다(checkSpans).
+const INLINE_CODE = /`[^`\n]+`/g;
+const URL = /https?:\/\/[^\s)>\]⟦\u3131-\u318E\uAC00-\uD7A3]+/g;
+
 export function protect(text) {
   const slots = [];
   const put = (m) => {
@@ -136,8 +141,6 @@ export function protect(text) {
   let t = text.replace(/(^|\n)[ \t]*(```+|~~~+)[^\n]*\n(?:[\s\S]*?\n)?[ \t]*\2[ \t]*(?=\n|$)/g, keepLead);
   // 닫히지 않은 펜스는 거기서부터 끝까지 통째로 보호
   t = t.replace(/(^|\n)[ \t]*(```|~~~)[\s\S]*$/, keepLead);
-  t = t.replace(/`[^`\n]+`/g, put);
-  t = t.replace(/https?:\/\/[^\s)>\]⟦]+/g, put);
   return { text: t, slots };
 }
 
@@ -146,6 +149,15 @@ export function restore(text, slots) {
     if (!text.includes(`⟦C${i}⟧`)) return null; // 토큰이 사라지면 신뢰할 수 없음
   }
   return text.replace(/⟦C(\d+)⟧/g, (m, n) => (Number(n) < slots.length ? slots[Number(n)] : m));
+}
+
+// 인라인 코드와 URL이 바뀌지 않았는지 확인한다. 문제가 있으면 이유를, 없으면 null을 돌려준다.
+export function checkSpans(before, after) {
+  const codes = new Set(before.match(INLINE_CODE) || []);
+  for (const c of codes) if (!after.includes(c)) return `코드 ${c} 가 바뀌거나 사라짐`;
+  for (const c of after.match(INLINE_CODE) || []) if (!codes.has(c)) return `원문에 없는 코드 ${c} 가 생김`;
+  for (const u of new Set(before.match(URL) || [])) if (!after.includes(u)) return 'URL이 바뀌거나 사라짐';
+  return null;
 }
 
 // 글 끝이 아직 닫히지 않은 코드 펜스 안인지 확인한다.
@@ -168,9 +180,11 @@ export const PROMPT = `너는 한국어 문장 다듬기 전문가다. 아래 [�
 - 의미, 사실, 숫자, 결론, 판단의 강도(확실/추정)를 바꾸지 마라. 정보를 더하거나 빼거나 요약하지 마라.
 - [원문]은 긴 답변의 일부일 수 있다. 앞뒤가 잘린 것처럼 보여도 내용을 지어내서 채우지 마라.
 - 조사와 어미가 빠진 명사 나열식 문장, 번역투, 어색한 직역을 완전하고 자연스러운 문장으로 고쳐라.
-- 파일 경로, 명령어, 함수/변수 이름, URL, 에러 메시지, 영어 기술 용어는 그대로 둬라.
-- ⟦C숫자⟧ 형태의 토큰은 코드이므로 글자 하나도 바꾸지 말고, 지우지 말고, 원래 자리에 그대로 둬라.
-- 마크다운 구조(제목, 목록, 번호, 표, 굵게, 인용)는 유지하라.
+- 파일 경로, 명령어, 함수/변수 이름, 에러 메시지, 영어 기술 용어는 그대로 둬라.
+- 백틱(\`)으로 감싼 코드와 URL은 한 글자도 바꾸지 말고, 지우지 말고, 백틱도 그대로 둬라. 그 뒤에 붙는 조사는 발음에 맞게 골라라(예: \`notes.txt\`를, \`cat\`을).
+- ⟦C숫자⟧ 형태의 토큰은 코드 블록이므로 글자 하나도 바꾸지 말고, 지우지 말고, 원래 자리에 그대로 둬라.
+- 마크다운 구조(제목, 목록, 번호, 표, 굵게, 인용)는 유지하라. 원문에 없는 목록 기호, 제목, 괄호를 새로 만들지 말고 문장 순서도 바꾸지 마라.
+- '원인:', '조치:' 같은 머리말 뒤에 오는 내용도 뜻이 통하는 완전한 문장으로 써라.
 - 원문에 존댓말이나 반말이 드러나 있으면 그 말투를 따르라. 명사로 끝나는 메모체라서 말투를 알 수 없으면 '-습니다' 존댓말로 써라. 문장 끝맺음은 자연스럽게 통일하라.
 - 원문이 이미 자연스러우면 거의 그대로 둬라.
 - 다시 쓴 본문만 출력하라. "다음은 ~입니다" 같은 머리말, 설명, 코드펜스 감싸기는 하지 마라.
@@ -328,6 +342,8 @@ function finish(result, prot, slots) {
   // 길이가 원문과 너무 다르면 요약했거나, 딴소리를 했거나, 거부 메시지가 돌아온 것이다.
   const ratio = r.length / Math.max(prot.trim().length, 1);
   if (ratio < 0.5 || ratio > 3) throw new Error(`결과 길이가 이상함 (원문의 ${ratio.toFixed(1)}배)`);
+  const changed = checkSpans(prot, r);
+  if (changed) throw new Error(changed);
   const restored = restore(r, slots);
   if (restored === null) throw new Error('코드 토큰 손실');
   return restored;
