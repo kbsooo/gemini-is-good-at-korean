@@ -15,7 +15,7 @@ import {
 } from './lib.mjs';
 
 const HANGUL = /[\uAC00-\uD7A3]/g;
-const BLOCK_BUDGET_MS = 25_000; // 문단 묶음 하나를 다듬는 데 쓰는 시간 한도
+const BLOCK_BUDGET_MS = 40_000; // 문단 묶음 하나를 다듬는 데 쓰는 시간 한도
 
 function out(displayContent) {
   if (displayContent === undefined) {

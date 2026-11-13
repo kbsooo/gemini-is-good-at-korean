@@ -202,11 +202,32 @@ export function apiKey() {
   }
 }
 
+// 방금 느렸거나 응답이 없던 모델은 완전히 빼지 않고 순서만 뒤로 미룬다.
+// 무료 등급에서는 멀쩡한 모델도 가끔 요청 하나가 한참 멈추기 때문에, 그때마다 빼 버리면 쓸 모델이 남지 않는다.
+export const SOFT = new Set(['slow', 'timeout', 'unavailable', 'network']);
+
+// 지금 시도할 모델 순서. 한도가 찼거나 쓸 수 없는 모델은 뺀다.
+export function usableModels(cfg) {
+  const fresh = [];
+  const later = [];
+  for (const m of modelChain(cfg)) {
+    const c = cooldown(m);
+    if (!c) fresh.push(m);
+    else if (SOFT.has(c.why)) later.push(m);
+  }
+  return [...fresh, ...later];
+}
+
 // 지금 바로 쓸 수 있는 API 모델이 하나라도 있는지.
 export function apiUsableNow(cfg) {
   if (cfg.backend === 'agy' || !apiKey() || cooldown(KEY_SLOT)) return false;
-  return modelChain(cfg).some((m) => !cooldown(m));
+  return usableModels(cfg).length > 0;
 }
+
+// Flash-Lite는 생각 과정 없이 바로 답해서 빠르다. 그 밖의 모델은 훨씬 오래 기다려 줘야 한다.
+const isLite = (model) => /flash-lite/i.test(model);
+const tryMs = (model, len) => Math.min(isLite(model) ? 6000 + len * 8 : 20_000 + len * 20, 60_000); // 요청 하나의 시간 제한
+const lateMs = (model, len) => (isLite(model) ? 2500 + len * 3 : 12_000 + len * 12); // 이만큼 지나면 "늦다"고 보고 다음 모델에도 요청
 
 // 테스트나 프록시용으로 API 주소를 바꿀 수 있다.
 const API_BASE = (process.env.GEMINI_KO_API_BASE || 'https://generativelanguage.googleapis.com').replace(/\/+$/, '');
@@ -269,7 +290,7 @@ async function callModel(model, prompt, key, ms, cancel) {
     }
   };
   // Flash-Lite는 기본이 최소 사고량이다. 그 밖의 모델은 사고량을 낮춰야 빨라진다.
-  const lowThinking = !/flash-lite/i.test(model);
+  const lowThinking = !isLite(model);
   let { r, j } = await send(lowThinking);
   if (r.status === 400 && lowThinking && /thinking/i.test(JSON.stringify(j))) ({ r, j } = await send(false));
   if (!r.ok) {
@@ -352,9 +373,7 @@ function finish(result, prot, slots) {
 // API 모델을 순서대로 시도한다. 무료 등급은 가끔 응답이 한참 늦는다. 그래서 평소보다 늦어지면
 // 기다리는 동안 다음 모델에도 같은 요청을 보내고, 먼저 도착한 답을 쓴다.
 async function viaApiChain(cfg, prompt, key, prot, slots, deadline, errors) {
-  const perTry = Math.min(6000 + prot.length * 8, 45_000);
-  const hedgeMs = 2500 + prot.length * 3;
-  const queue = modelChain(cfg).filter((m) => !cooldown(m));
+  const queue = usableModels(cfg);
   const running = new Map();
   const order = []; // 요청을 보낸 순서
   const cancels = [];
@@ -364,7 +383,7 @@ async function viaApiChain(cfg, prompt, key, prot, slots, deadline, errors) {
     const ctl = new AbortController();
     cancels.push(ctl);
     order.push(model);
-    const ms = Math.max(Math.min(perTry, deadline - Date.now()), 1000);
+    const ms = Math.max(Math.min(tryMs(model, prot.length), deadline - Date.now()), 1000);
     running.set(model, callModel(model, prompt, key, ms, ctl.signal)
       .then((raw) => ({ model, text: finish(raw, prot, slots) }))
       .catch((e) => {
@@ -385,8 +404,9 @@ async function viaApiChain(cfg, prompt, key, prot, slots, deadline, errors) {
     }
     let timer;
     const waits = [...running.values()];
-    if (queue.length && deadline - Date.now() > hedgeMs + 3000) {
-      waits.push(new Promise((r) => { timer = setTimeout(() => r({ late: true }), hedgeMs); }));
+    const late = lateMs(order.at(-1), prot.length);
+    if (queue.length && deadline - Date.now() > late + 3000) {
+      waits.push(new Promise((r) => { timer = setTimeout(() => r({ late: true }), late); }));
     }
     const res = await Promise.race(waits);
     clearTimeout(timer);

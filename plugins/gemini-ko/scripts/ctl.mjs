@@ -11,7 +11,7 @@
 import fs from 'node:fs';
 import {
   STATE_DIR, CONFIG_PATH, KEY_PATH, DEFAULTS, loadConfig, modelChain, ensureDirs,
-  cooldown, clearCooldowns, KEY_SLOT, apiKey, rewriteBlock,
+  cooldown, clearCooldowns, KEY_SLOT, SOFT, apiKey, rewriteBlock,
 } from './lib.mjs';
 
 ensureDirs();
@@ -55,7 +55,7 @@ function coolNote(name) {
   const sec = Math.round((c.until - Date.now()) / 1000);
   const tomorrow = when.toDateString() !== new Date().toDateString() ? '내일 ' : '';
   const until = sec < 120 ? `${sec}초 뒤` : `${tomorrow}${String(when.getHours()).padStart(2, '0')}:${String(when.getMinutes()).padStart(2, '0')}에`;
-  return ` (${WHY[c.why] || '쉬는 중'}, ${until} 다시 시도)`;
+  return SOFT.has(c.why) ? ` (방금 ${WHY[c.why]}, ${until.replace(/에$/, '')}까지 뒤 순서로 미룸)` : ` (${WHY[c.why] || '쉬는 중'}, ${until} 다시 시도)`;
 }
 
 async function test(full) {
@@ -63,7 +63,7 @@ async function test(full) {
   if (!apiKey()) fail('API 키가 없습니다. 일반 터미널에서 gemini-ko key 로 등록하세요.');
   let shown = false;
   for (const m of modelChain(full)) {
-    if (cooldown(m)) { console.log(`${m}: 건너뜀${coolNote(m)}`); continue; }
+    if (cooldown(m) && !SOFT.has(cooldown(m).why)) { console.log(`${m}: 건너뜀${coolNote(m)}`); continue; }
     const t0 = Date.now();
     try {
       const r = await rewriteBlock(sample, { ...full, backend: 'api', apiModel: m, apiModels: [m] }, { deadline: t0 + 30_000, allowAgy: false });
