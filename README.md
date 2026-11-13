@@ -55,7 +55,7 @@ claude plugin install gemini-ko@gemini-is-good-at-korean
 ```bash
 cat > ~/.local/bin/gemini-ko <<'EOF'
 #!/bin/sh
-exec node "$(ls -dt ~/.claude/plugins/cache/gemini-is-good-at-korean/gemini-ko/*/scripts/ctl.mjs | head -1)" "$@"
+exec node "$(ls -d ~/.claude/plugins/cache/gemini-is-good-at-korean/gemini-ko/*/scripts/ctl.mjs | sort -V | tail -1)" "$@"
 EOF
 chmod +x ~/.local/bin/gemini-ko
 ```
