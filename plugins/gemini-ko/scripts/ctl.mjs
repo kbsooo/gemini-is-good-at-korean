@@ -11,7 +11,7 @@
 import fs from 'node:fs';
 import {
   STATE_DIR, CONFIG_PATH, KEY_PATH, DEFAULTS, loadConfig, modelChain, ensureDirs,
-  cooldown, clearCooldowns, KEY_SLOT, SOFT, apiKey, rewriteBlock,
+  cooldown, clearCooldowns, KEY_SLOT, SOFT, WHY, usableModels, isLite, apiKey, rewriteBlock,
 } from './lib.mjs';
 
 ensureDirs();
@@ -47,7 +47,6 @@ function readSecret(label) {
   });
 }
 
-const WHY = { 'quota-day': '오늘 한도 소진', 'quota-minute': '분당 한도 초과', timeout: '응답 없음', slow: '응답이 느림', unavailable: '서버 혼잡', 'not-found': '쓸 수 없는 모델', 'bad-request': '요청 거부됨', network: '연결 실패', auth: 'API 키 거부됨' };
 function coolNote(name) {
   const c = cooldown(name);
   if (!c) return '';
@@ -108,7 +107,9 @@ const full = loadConfig();
 const hasKey = !!apiKey();
 const useApi = full.backend !== 'agy' && hasKey;
 const useAgy = full.backend !== 'api';
-const how = full.mode === 'append' ? 'append (원문 뒤에 덧붙임)' : useApi && full.stream ? 'replace (문단 단위로 바로 표시)' : 'replace (답변이 끝난 뒤 표시)';
+const firstModel = useApi ? usableModels(full)[0] : null;
+const split = useApi && full.stream && firstModel && isLite(firstModel);
+const how = full.mode === 'append' ? 'append (원문 뒤에 덧붙임)' : split ? 'replace (문단 묶음으로 나눠서 다듬음)' : 'replace (답변 전체를 한 번에 다듬음)';
 console.log(`gemini-ko: ${full.enabled ? '켜짐' : '꺼짐'} | 모드: ${how} | 백엔드: ${useApi ? 'Gemini API' : useAgy ? 'Antigravity agy' : '없음 (API 키 필요)'}`);
 const steps = [];
 if (useApi) for (const m of modelChain(full)) steps.push(m + coolNote(m));

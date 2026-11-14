@@ -11,11 +11,12 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   BUF_DIR, loadConfig, ensureDirs, log, atomicWrite, sleep,
-  protect, insideFence, apiUsableNow, rewriteBlock,
+  protect, insideFence, apiUsableNow, usableModels, isLite, rewriteBlock,
 } from './lib.mjs';
 
 const HANGUL = /[\uAC00-\uD7A3]/g;
 const BLOCK_BUDGET_MS = 40_000; // 문단 묶음 하나를 다듬는 데 쓰는 시간 한도
+const MAX_PARTS = 6; // 한꺼번에 들어온 긴 글을 최대 몇 묶음으로 나눠 동시에 다듬을지
 
 function out(displayContent) {
   if (displayContent === undefined) {
@@ -66,9 +67,12 @@ function sweepBuffers() {
 
 // 이 답변을 문단 묶음 단위로 다듬을지(stream), 끝에서 한 번에 다듬을지(whole)는
 // 가장 먼저 도착한 조각이 정하고, 나머지 조각은 그 결정을 따른다.
+// 묶음으로 나누면 요청 수가 늘어난다. 그래서 무료 한도가 넉넉한 Flash-Lite 계열을 쓸 때만 나누고,
+// 하루 한도가 작은 모델(예: Gemini 4 Hydrogen)이 맨 앞일 때는 답변 전체를 요청 한 번으로 보낸다.
 async function decideMode(dir, cfg) {
   const file = path.join(dir, 'mode');
-  const want = cfg.mode === 'replace' && cfg.stream && apiUsableNow(cfg) ? 'stream' : 'whole';
+  const split = cfg.mode === 'replace' && cfg.stream && apiUsableNow(cfg) && isLite(usableModels(cfg)[0]);
+  const want = split ? 'stream' : 'whole';
   try {
     fs.writeFileSync(file, want, { flag: 'wx', mode: 0o600 });
     return want;
@@ -101,6 +105,20 @@ export function plan(deltas, finalAtEnd, blockChars) {
   return groups;
 }
 
+// 긴 글을 빈 줄 기준으로 몇 묶음으로 나눈다. Claude Desktop처럼 답변 전체를 조각 하나로 넘기는 환경에서,
+// 묶음들을 동시에 다듬어 기다리는 시간을 줄이기 위해서다. 나눈 묶음을 이어 붙이면 원래 글과 똑같다.
+export function splitBlocks(text, blockChars) {
+  const size = Math.max(blockChars, Math.ceil(text.length / MAX_PARTS));
+  const pieces = text.match(/[\s\S]*?\n[ \t]*\n+|[\s\S]+$/g) || [text];
+  const parts = plan(pieces, true, size).map((g) => pieces.slice(g.from, g.to + 1).join(''));
+  // 마지막 묶음이 너무 짧으면 앞 묶음에 붙인다
+  if (parts.length > 1 && parts.at(-1).trim().length < size / 2) {
+    const tail = parts.pop();
+    parts[parts.length - 1] += tail;
+  }
+  return parts;
+}
+
 // 글 한 덩어리를 다듬는다. 다듬을 필요가 없거나 실패하면 원문을 그대로 돌려준다.
 async function polish(block, cfg, { allowAgy, budgetMs }) {
   const core = block.trim();
@@ -112,10 +130,10 @@ async function polish(block, cfg, { allowAgy, budgetMs }) {
   if (core.length > cfg.maxChars) return { text: block, stat: { ok: false, err: '글이 너무 길어서 건너뜀' } };
   const t0 = Date.now();
   try {
-    const { text, used } = await rewriteBlock(core, cfg, { deadline: t0 + budgetMs, allowAgy });
+    const { text, used, note } = await rewriteBlock(core, cfg, { deadline: t0 + budgetMs, allowAgy });
     const ms = Date.now() - t0;
-    log(`ok ${used} ${(ms / 1000).toFixed(1)}s len=${core.length}`);
-    return { text: lead + text + trail, stat: { ok: true, model: used, ms } };
+    log(`ok ${used} ${(ms / 1000).toFixed(1)}s len=${core.length}${note ? ` (${note})` : ''}`);
+    return { text: lead + text + trail, stat: { ok: true, model: used, ms, note } };
   } catch (e) {
     log(`fail ${e.message}`);
     return { text: block, stat: { ok: false, err: String(e.message).slice(0, 80) } };
@@ -130,9 +148,12 @@ function summary(stats, cfg) {
   if (done.length && cfg.showBadge) {
     const models = [...new Set(done.map((d) => d.model))].join(', ');
     const slowest = (Math.max(...done.map((d) => d.ms)) / 1000).toFixed(1);
+    // 맨 앞 모델 대신 다른 모델을 썼다면 이유를 덧붙인다
+    const note = done.find((d) => d.note)?.note;
+    const why = note ? ` · ${note}` : '';
     s += done.length > 1
-      ? `\n\n— Gemini로 다듬음 (${models} · ${done.length}묶음 · 가장 느린 묶음 ${slowest}s)`
-      : `\n\n— Gemini로 다듬음 (${models} · ${slowest}s)`;
+      ? `\n\n— Gemini로 다듬음 (${models} · ${done.length}묶음 · 가장 느린 묶음 ${slowest}s${why})`
+      : `\n\n— Gemini로 다듬음 (${models} · ${slowest}s${why})`;
   }
   if (failed.length) {
     s += `\n\n(gemini-ko: ${done.length ? `${failed.length}곳은 ` : ''}다듬지 못해 원문을 표시합니다. ${failed[0].err})`;
@@ -186,6 +207,7 @@ async function main() {
       ? { text: full, stat: { skipped: true } }
       : await polish(full, cfg, { allowAgy: true, budgetMs: cfg.timeoutSec * 1000 });
     const tail = summary([res.stat], cfg);
+    log(`msg entry=${entry || '-'} mode=whole batches=${k + 1}`);
     done();
     if (res.stat.ok !== true) {
       // append 모드에서는 앞 조각이 이미 화면에 나와 있으므로 마지막 조각만 돌려준다
@@ -201,24 +223,28 @@ async function main() {
   const mine = groups.at(-1);
   if (!mine || mine.to !== k) return out(''); // 아직 끊을 자리가 아니다. 뒤에 오는 조각이 함께 다듬는다.
 
+  // 이 조각이 맡은 글. 길면 몇 묶음으로 나눠 동시에 다듬는다.
   const block = deltas.slice(mine.from).join('');
+  const parts = passthrough ? [] : splitBlocks(block, cfg.blockChars);
+  const results = await Promise.all(parts.map((p) => polish(p, cfg, { allowAgy: false, budgetMs: BLOCK_BUDGET_MS })));
   const res = passthrough
-    ? { text: block, stat: { skipped: true } }
-    : await polish(block, cfg, { allowAgy: false, budgetMs: BLOCK_BUDGET_MS });
-  atomicWrite(stat(k), JSON.stringify(res.stat));
+    ? { text: block, stats: [{ skipped: true }] }
+    : { text: results.map((r) => r.text).join(''), stats: results.map((r) => r.stat) };
+  atomicWrite(stat(k), JSON.stringify(res.stats));
   if (!ev.final) return out(res.text);
 
   // 마지막 조각: 앞선 묶음들이 끝나기를 기다렸다가 요약 줄을 붙인다
   const earlier = groups.slice(0, -1).map((g) => stat(g.to));
   await waitFor(earlier, BLOCK_BUDGET_MS + 5000);
-  const stats = [...earlier.map((f) => {
+  const stats = [...earlier.flatMap((f) => {
     try {
       return JSON.parse(fs.readFileSync(f, 'utf8'));
     } catch {
-      return {};
+      return [];
     }
-  }), res.stat];
+  }), ...res.stats];
   const tail = summary(stats, cfg);
+  log(`msg entry=${entry || '-'} mode=stream batches=${k + 1} blocks=${stats.filter((s) => !s.skipped).length}`);
   done();
   return out(tail ? `${res.text.replace(/\s+$/, '')}${tail}\n` : res.text);
 }

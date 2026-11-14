@@ -206,6 +206,19 @@ export function apiKey() {
 // 무료 등급에서는 멀쩡한 모델도 가끔 요청 하나가 한참 멈추기 때문에, 그때마다 빼 버리면 쓸 모델이 남지 않는다.
 export const SOFT = new Set(['slow', 'timeout', 'unavailable', 'network']);
 
+// 모델을 쓰지 못한 이유를 사람이 읽는 말로.
+export const WHY = {
+  'quota-day': '오늘 한도 소진',
+  'quota-minute': '분당 한도 초과',
+  timeout: '응답 없음',
+  slow: '응답이 늦음',
+  unavailable: '서버 혼잡',
+  'not-found': '쓸 수 없는 모델',
+  'bad-request': '요청 거부됨',
+  network: '연결 실패',
+  auth: 'API 키 거부됨',
+};
+
 // 지금 시도할 모델 순서. 한도가 찼거나 쓸 수 없는 모델은 뺀다.
 export function usableModels(cfg) {
   const fresh = [];
@@ -225,7 +238,7 @@ export function apiUsableNow(cfg) {
 }
 
 // Flash-Lite는 생각 과정 없이 바로 답해서 빠르다. 그 밖의 모델은 훨씬 오래 기다려 줘야 한다.
-const isLite = (model) => /flash-lite/i.test(model);
+export const isLite = (model) => /flash-lite/i.test(model);
 const tryMs = (model, len) => Math.min(isLite(model) ? 6000 + len * 8 : 20_000 + len * 20, 60_000); // 요청 하나의 시간 제한
 const lateMs = (model, len) => (isLite(model) ? 2500 + len * 3 : 12_000 + len * 12); // 이만큼 지나면 "늦다"고 보고 다음 모델에도 요청
 
@@ -374,6 +387,9 @@ function finish(result, prot, slots) {
 // 기다리는 동안 다음 모델에도 같은 요청을 보내고, 먼저 도착한 답을 쓴다.
 async function viaApiChain(cfg, prompt, key, prot, slots, deadline, errors) {
   const queue = usableModels(cfg);
+  const first = modelChain(cfg)[0]; // 사용자가 맨 앞에 둔 모델
+  const firstCool = cooldown(first);
+  const failedWhy = new Map();
   const running = new Map();
   const order = []; // 요청을 보낸 순서
   const cancels = [];
@@ -389,6 +405,7 @@ async function viaApiChain(cfg, prompt, key, prot, slots, deadline, errors) {
       .catch((e) => {
         if (!won) { // 다른 모델의 답을 이미 채택해서 취소한 요청은 실패로 치지 않는다
           errors.push(e.message);
+          failedWhy.set(model, e.why || 'error');
           log(`api fail ${e.message}`);
           if (e.coolMs) setCooldown(e.allModels ? KEY_SLOT : model, e.coolMs, e.why);
           if (e.allModels) queue.length = 0;
@@ -422,7 +439,13 @@ async function viaApiChain(cfg, prompt, key, prot, slots, deadline, errors) {
         if (order.indexOf(slow) < order.indexOf(res.model)) setCooldown(slow, 60_000, 'slow');
       }
       for (const c of cancels) c.abort();
-      return { text: res.text, used: res.model };
+      // 맨 앞 모델이 아닌 모델의 답을 썼다면 그 이유를 함께 돌려준다 (화면의 요약 줄에 표시)
+      let note = '';
+      if (res.model !== first) {
+        const why = failedWhy.get(first) || (running.has(first) ? 'slow' : firstCool?.why) || 'slow';
+        note = `${first}: ${WHY[why] || '사용 불가'}`;
+      }
+      return { text: res.text, used: res.model, note };
     }
   }
 }
@@ -443,7 +466,8 @@ export async function rewriteBlock(original, cfg, { deadline, allowAgy = true } 
 
   if (allowAgy && cfg.backend !== 'api' && left() >= 8000) {
     try {
-      return { text: finish(await viaAgy(prompt, cfg, left()), prot, slots), used: `agy:${cfg.agyModel}` };
+      const note = key ? `Gemini API: ${errors.at(-1) ? '실패' : '쓸 수 있는 모델 없음'}` : '';
+      return { text: finish(await viaAgy(prompt, cfg, left()), prot, slots), used: `agy:${cfg.agyModel}`, note };
     } catch (e) {
       errors.push(e.message);
     }
